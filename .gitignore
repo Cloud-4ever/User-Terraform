@@ -1,48 +1,96 @@
-# Prerequisites
-*.d
+# ===========================================
+# Environment
+# ===========================================
+.env
+.env.local
+.env.production
+.env.development
+.env.*.local
+# .env.example은 템플릿이므로 커밋 (무시하지 않음)
 
-# Object files
+# ===========================================
+# Node / Frontend
+# ===========================================
+node_modules/
+dist/
+.vite/
+*.local
+
+# ===========================================
+# Java / Spring Boot / Maven
+# ===========================================
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+logs/
+
+# ===========================================
+# Terraform
+# ===========================================
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ===========================================
+# IDE
+# ===========================================
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# ===========================================
+# OS
+# ===========================================
+.DS_Store
+Thumbs.db
+
+# ===========================================
+# C/C++ (기존)
+# ===========================================
+*.d
 *.o
 *.ko
 *.obj
 *.elf
-
-# Linker output
 *.ilk
 *.map
 *.exp
-
-# Precompiled Headers
 *.gch
 *.pch
-
-# Libraries
 *.lib
 *.a
 *.la
 *.lo
-
-# Shared objects (inc. Windows DLLs)
 *.dll
 *.so
 *.so.*
 *.dylib
-
-# Executables
 *.exe
 *.out
 *.app
 *.i*86
 *.x86_64
 *.hex
-
-# Debug files
 *.dSYM/
 *.su
 *.idb
 *.pdb
-
-# Kernel Module Compile Results
 *.mod*
 *.cmd
 .tmp_versions/
@@ -50,6 +98,4 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
-
-# debug information files
 *.dwo
