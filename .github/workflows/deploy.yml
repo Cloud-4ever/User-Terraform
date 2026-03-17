@@ -1,0 +1,149 @@
+name: C4-Finder Terraform Scan And Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: c4finder-main-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  inspect-and-decide:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.parse.outputs.action }}
+      message: ${{ steps.parse.outputs.message }}
+      commit_sha: ${{ steps.parse.outputs.commit_sha }}
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Collect commit metadata and terraform files
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          terraform_dir = Path("terraform")
+          terraform_files = []
+
+          if terraform_dir.exists():
+              for path in terraform_dir.rglob("*.tf"):
+                  if ".terraform" in path.parts:
+                      continue
+
+                  terraform_files.append({
+                      "file": path.as_posix(),
+                      "content": path.read_text(encoding="utf-8")
+                  })
+
+          commit_message = subprocess.check_output(
+              ["git", "log", "-1", "--pretty=%B"],
+              text=True,
+              encoding="utf-8"
+          ).strip()
+
+          payload = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "repository_id": int(os.environ["GITHUB_REPOSITORY_ID"]),
+              "event_name": os.environ["GITHUB_EVENT_NAME"],
+              "ref": os.environ["GITHUB_REF"],
+              "sha": os.environ["GITHUB_SHA"],
+              "commit_message": commit_message,
+              "actor": os.environ["GITHUB_ACTOR"],
+              "terraform_files": terraform_files
+          }
+
+          with open("scan-payload.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False)
+          PY
+
+      - name: Call C4-Finder backend API
+        env:
+          C4FINDER_API_URL: ${{ secrets.C4FINDER_API_URL }}
+        shell: bash
+        run: |
+          curl --fail --show-error --location \
+            -X POST "${C4FINDER_API_URL}/scan/trigger" \
+            -H "Content-Type: application/json" \
+            --data @scan-payload.json \
+            -o scan-result.json
+
+      - name: Parse backend decision
+        id: parse
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          with open("scan-result.json", "r", encoding="utf-8") as f:
+              result = json.load(f)
+
+          action = result.get("action", "reject")
+          message = result.get("message", "")
+          commit_sha = result.get("commit_sha") or ""
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"action={action}\n")
+              out.write(f"message={message}\n")
+              out.write(f"commit_sha={commit_sha}\n")
+          PY
+
+      - name: Stop current run after remediation push
+        if: steps.parse.outputs.action == 'retry'
+        run: |
+          echo "C4-Finder remediated the Terraform code and pushed a new commit to main."
+          echo "Current deployment is stopped. A new workflow run will start from the new push."
+          exit 0
+
+      - name: Reject deployment
+        if: steps.parse.outputs.action == 'reject'
+        run: |
+          echo "Deployment rejected by C4-Finder."
+          echo "${{ steps.parse.outputs.message }}"
+          exit 1
+
+      - name: Fail on unknown action
+        if: steps.parse.outputs.action != 'success' && steps.parse.outputs.action != 'retry' && steps.parse.outputs.action != 'reject'
+        run: |
+          echo "Unknown action from backend: ${{ steps.parse.outputs.action }}"
+          exit 1
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: inspect-and-decide
+    if: needs.inspect-and-decide.outputs.action == 'success'
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
