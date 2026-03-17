@@ -5,17 +5,11 @@ on:
     branches:
       - main
 
-concurrency:
-  group: c4finder-main-${{ github.repository }}
-  cancel-in-progress: false
-
 jobs:
-  inspect-and-decide:
+  inspect-and-wait:
     runs-on: ubuntu-latest
     outputs:
-      action: ${{ steps.parse.outputs.action }}
-      message: ${{ steps.parse.outputs.message }}
-      commit_sha: ${{ steps.parse.outputs.commit_sha }}
+      decision: ${{ steps.wait.outputs.decision }}
 
     steps:
       - name: Checkout main branch
@@ -24,7 +18,7 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: Collect commit metadata and terraform files
+      - name: Collect terraform files
         shell: bash
         run: |
           python - <<'PY'
@@ -40,7 +34,6 @@ jobs:
               for path in terraform_dir.rglob("*.tf"):
                   if ".terraform" in path.parts:
                       continue
-
                   terraform_files.append({
                       "file": path.as_posix(),
                       "content": path.read_text(encoding="utf-8")
@@ -67,7 +60,7 @@ jobs:
               json.dump(payload, f, ensure_ascii=False)
           PY
 
-      - name: Call C4-Finder backend API
+      - name: Trigger scan
         env:
           C4FINDER_API_URL: ${{ secrets.C4FINDER_API_URL }}
         shell: bash
@@ -78,8 +71,8 @@ jobs:
             --data @scan-payload.json \
             -o scan-result.json
 
-      - name: Parse backend decision
-        id: parse
+      - name: Read scan id
+        id: scan
         shell: bash
         run: |
           python - <<'PY'
@@ -89,40 +82,60 @@ jobs:
           with open("scan-result.json", "r", encoding="utf-8") as f:
               result = json.load(f)
 
-          action = result.get("action", "reject")
-          message = result.get("message", "")
-          commit_sha = result.get("commit_sha") or ""
+          scan_id = str(result["scan_id"])
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"action={action}\n")
-              out.write(f"message={message}\n")
-              out.write(f"commit_sha={commit_sha}\n")
+              out.write(f"scan_id={scan_id}\n")
           PY
 
-      - name: Stop current run after remediation push
-        if: steps.parse.outputs.action == 'retry'
+      - name: Wait for user decision
+        id: wait
+        env:
+          C4FINDER_API_URL: ${{ secrets.C4FINDER_API_URL }}
+          SCAN_ID: ${{ steps.scan.outputs.scan_id }}
+        shell: bash
         run: |
-          echo "C4-Finder remediated the Terraform code and pushed a new commit to main."
-          echo "Current deployment is stopped. A new workflow run will start from the new push."
-          exit 0
+          for i in $(seq 1 60); do
+            response=$(curl --fail --show-error --silent \
+              "${C4FINDER_API_URL}/scan/${SCAN_ID}/decision")
+
+            decision=$(python -c "import json,sys; print(json.loads(sys.argv[1]).get('decision','pending'))" "$response")
+
+            echo "Current decision: $decision"
+
+            if [ "$decision" = "approve" ] || [ "$decision" = "fix" ] || [ "$decision" = "reject" ]; then
+              echo "decision=$decision" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep 30
+          done
+
+          echo "decision=timeout" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger fix
+        if: steps.wait.outputs.decision == 'fix'
+        env:
+          C4FINDER_API_URL: ${{ secrets.C4FINDER_API_URL }}
+          SCAN_ID: ${{ steps.scan.outputs.scan_id }}
+        run: |
+          curl --fail --show-error --location \
+            -X POST "${C4FINDER_API_URL}/fix/trigger" \
+            -H "Content-Type: application/json" \
+            -d "{\"scan_id\": \"${SCAN_ID}\"}"
+
+      - name: Stop after remediation push
+        if: steps.wait.outputs.decision == 'fix'
+        run: exit 0
 
       - name: Reject deployment
-        if: steps.parse.outputs.action == 'reject'
-        run: |
-          echo "Deployment rejected by C4-Finder."
-          echo "${{ steps.parse.outputs.message }}"
-          exit 1
-
-      - name: Fail on unknown action
-        if: steps.parse.outputs.action != 'success' && steps.parse.outputs.action != 'retry' && steps.parse.outputs.action != 'reject'
-        run: |
-          echo "Unknown action from backend: ${{ steps.parse.outputs.action }}"
-          exit 1
+        if: steps.wait.outputs.decision == 'reject' || steps.wait.outputs.decision == 'timeout'
+        run: exit 1
 
   deploy:
     runs-on: ubuntu-latest
-    needs: inspect-and-decide
-    if: needs.inspect-and-decide.outputs.action == 'success'
+    needs: inspect-and-wait
+    if: needs.inspect-and-wait.outputs.decision == 'approve'
     defaults:
       run:
         working-directory: terraform
@@ -130,8 +143,6 @@ jobs:
     steps:
       - name: Checkout main branch
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
